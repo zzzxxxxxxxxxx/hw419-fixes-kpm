@@ -11,7 +11,7 @@
 
 ## 问题现象
 
-在 Huawei/HarmonyOS 内核的 LXC/chroot 里运行 bubblewrap：
+在 Huawei/HarmonyOS 内核的 LXC 里运行 bubblewrap：
 
 ```console
 # bwrap --unshare-all --new-session --proc /proc -- /bin/bash
