@@ -149,5 +149,4 @@ make
 
 ## License
 
-GPL-2.0-or-later。KPM-Headers 来自
-[bmax121/KernelPatch](https://github.com/bmax121/KernelPatch)。
+GPL-2.0-or-later。
