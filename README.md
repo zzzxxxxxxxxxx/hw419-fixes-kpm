@@ -146,7 +146,3 @@ make
 - 同一 vendor 内核还存在 `unshare(CLONE_NEWNET)` 单独返回 ENOMEM 的独立问题
   （clone 路径正常），本模块未涉及；受影响工具需避免在 unshare() 里携带
   `CLONE_NEWNET`。
-
-## License
-
-GPL-2.0-or-later。
