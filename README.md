@@ -1,4 +1,4 @@
-# hw-procfix
+# hw-procfix-kpm
 
 > 修复华为/HarmonyOS 4.19 vendor 内核上 bwrap / runc / crun 等容器工具报
 > `Can't mount proc on /newroot/proc: Resource busy` 的 KernelPatch 模块 (KPM)。
