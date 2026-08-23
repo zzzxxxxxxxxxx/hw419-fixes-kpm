@@ -98,9 +98,7 @@ KPM 把 `cbz w0,+0x74`（`340003A0`）替换为无条件跳转 `b +0x74`（`1400
 的 KPM 头文件（仓库内 `KPM-Headers/` 为 vendored 副本，来自上游 GPL-2.0 发布）。
 
 ```sh
-make CC=clang            # Termux
-# 或
-make CC=aarch64-linux-musl-gcc
+make
 ```
 
 > 注意必须带 `-fno-pic -fno-pie`：默认 PIE 会产生 KP 加载器不支持的
