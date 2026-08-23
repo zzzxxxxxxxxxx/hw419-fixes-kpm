@@ -41,7 +41,7 @@
 KPM_NAME("hw-procfix");
 KPM_VERSION("1.0.0");
 KPM_LICENSE("GPL v2");
-KPM_AUTHOR("ox");
+KPM_AUTHOR("ox-alpha");
 KPM_DESCRIPTION("Fix Huawei procfs sb ownership (bwrap EBUSY)");
 
 #define TAG "[hw-procfix] "
