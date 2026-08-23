@@ -107,7 +107,7 @@ make
 
 ## 使用
 
-通过 APatch/FolkPatch 的 KPM 加载通道载入（示例为 supercall 加载器）：
+通过 APatch/FolkPatch 的 KPM 加载通道载入。
 
 控制接口：
 
