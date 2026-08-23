@@ -137,13 +137,6 @@ make
 | 各命名空间单独 unshare ×6 | ✅ |
 | 退出码穿透（中间进程转发） | ✅ exit 42 正确传递 |
 
-## 附：用户态替代方案
-
-无法加载内核模块时，可将 bwrap 编排改为分步式绕过（见
-[`patches/bwrap-sequential-pidns.patch`](patches/bwrap-sequential-pidns.patch)）：
-保留组合 clone 但去掉 `CLONE_NEWPID`，子进程内 `unshare(CLONE_NEWPID)+fork`
-进入新 pidns，中间进程转发退出码。仅修复 bwrap 自身，runc/crun 需各自改造。
-
 ## 已知限制
 
 - 仅针对本逆向确认的 4.19 vendor 布局；其他内核版本靠运行时模式校验兜底，
