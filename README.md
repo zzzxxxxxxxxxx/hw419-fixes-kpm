@@ -109,12 +109,6 @@ make
 
 通过 APatch/FolkPatch 的 KPM 加载通道载入（示例为 supercall 加载器）：
 
-```sh
-sc_kpm_load <你的superkey> /path/to/hw_procfix.kpm
-dmesg | grep hw-procfix
-# [hw-procfix] patched 340003a0 -> 1400001d : procfs sb now always owned by pidns->user_ns
-```
-
 控制接口：
 
 | 操作 | 方式 |
