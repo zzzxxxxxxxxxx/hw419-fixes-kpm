@@ -95,7 +95,9 @@ KPM 把 `cbz w0,+0x74`（`340003A0`）替换为无条件跳转 `b +0x74`（`1400
 ## 编译
 
 依赖交叉/本机 aarch64 gcc 或 clang，以及 [KernelPatch](https://github.com/bmax121/KernelPatch)
-的 KPM 头文件（仓库内 `KPM-Headers/` 为 vendored 副本，来自上游 GPL-2.0 发布）。
+的 KPM 头文件（以 git 子模块形式引用
+  [bmax121/KernelPatch](https://github.com/bmax121/KernelPatch)，clone 时加 `--recursive`
+  或 `git submodule update --init`）。
 
 ```sh
 make
