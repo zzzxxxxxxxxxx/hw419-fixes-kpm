@@ -146,3 +146,39 @@ make
 - 同一 vendor 内核还存在 `unshare(CLONE_NEWNET)` 单独返回 ENOMEM 的独立问题
   （clone 路径正常），本模块未涉及；受影响工具需避免在 unshare() 里携带
   `CLONE_NEWNET`。
+
+## 附：Codex 沙箱 SIGSYS 备忘（4.19 vendor 内核 + Alpine/musl）
+
+> 2026-09 在同一台 GOT-W29 上的排查记录，供后续迁移/升级环境时参考。
+
+Codex CLI 0.154.0（aarch64-musl）在 `workspace-write` 沙箱内运行任何需要 PATH 查找的命令，
+都会报 `Bad system call` 并以 exit 159 结束（SIGSYS = 31）。
+
+**触发机制**：Codex 在“沙箱内禁用网络”时会额外安装一层 seccomp 过滤器，而该过滤器对本
+内核不支持的新系统调用使用 `SECCOMP_RET_TRAP`，而非返回 `ENOSYS` 让 libc 回退：
+
+- `faccessat2`（aarch64 #439，Linux 5.8+）：musl 的 `euidaccess` / `faccessat(AT_EACCESS)`
+  会优先调用它；bash 的 PATH 查找、`command -v`、`[[ -r/-w/-x ]]` 全部命中，进程在内核
+  有机会返回 ENOSYS 之前就被 SIGSYS 杀死。
+- `clone3`（aarch64 #435，Linux 5.3+）：musl 创建线程时会优先尝试，多线程程序同样被杀。
+
+**实测证据**：沙箱内静态探针捕获到 `si_code=1 (SYS_SECCOMP) syscall=439 arch=0xC00000B7
+(aarch64)`；同一调用在沙箱外返回 `ENOSYS`，musl 正常回退到老的 `faccessat`，因此问题不在
+内核，而在 seccomp 策略。
+
+**规避方式**：让沙箱的网络策略为 enabled，该 seccomp 过滤器就不会安装，bwrap 文件沙箱仍
+然生效：
+
+```toml
+sandbox_mode = "workspace-write"
+
+[sandbox_workspace_write]
+network_access = true
+```
+
+实测 `Seccomp: 0`，裸 `ls` / `command -v` / `[[ -r ]]` 恢复正常；`/etc`、`~/.codex` 仍为
+只读，工作区可写。注意 Android/HarmonyOS 的按 UID 网络策略会让 bwrap user namespace 内的
+`socket()` 返回 EPERM，所以沙箱内实际仍然没有外网。
+
+**建议上游修复**：对内核不支持的新 syscall 应返回 `ENOSYS`（`SECCOMP_RET_ERRNO`），而不是
+`SECCOMP_RET_TRAP`。
