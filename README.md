@@ -1,184 +1,140 @@
-# hw-procfix-kpm
+# hw419-fixes-kpm
 
-> 修复华为/HarmonyOS 4.19 vendor 内核上 bwrap / runc / crun 等容器工具报
-> `Can't mount proc on /newroot/proc: Resource busy` 的 KernelPatch 模块 (KPM)。
+> 华为/HarmonyOS 4.19 vendor 内核的 KernelPatch 修补模块（KPM，
+> 内核模块名为 `hw419-fixes`）：
+> 修复 bwrap/runc/crun 的 procfs `EBUSY`，并规避 KernelPatch 残留 seccomp
+> filter 对旧内核未实现 syscall 注入的 SIGSYS。
 
 - 适用设备：已验证 GOT-W29（骁龙平台，`4.19.157-perf+`），理论适用同源内核
-- 依赖：[KernelPatch](https://github.com/bmax121/KernelPatch) / APatch / FolkPatch 环境
+- 依赖：[KernelPatch](https://github.com/bmax121/KernelPatch) / APatch / FolkPatch
 - 许可：GPL-2.0
 
 ---
 
-## 问题现象
+## procfs EBUSY
 
-在 Huawei/HarmonyOS 内核的 LXC 里运行 bubblewrap：
+在 Huawei/HarmonyOS 内核的 LXC 中运行 bubblewrap：
 
 ```console
 # bwrap --unshare-all --new-session --proc /proc -- /bin/bash
 bwrap: Can't mount proc on /newroot/proc: Resource busy
 ```
 
-所有使用**原子 `clone(CLONE_NEWUSER | CLONE_NEWPID)`** 编排的工具全部中招
-（bwrap、runc、crun、youki……）；而 util-linux/busybox 的 `unshare` 分步式编排侥幸幸免。
+所有使用原子 `clone(CLONE_NEWUSER | CLONE_NEWPID)` 的工具均受影响。
 
-## 根因分析（逆向 boot.elf + GPL 源码比对结论）
+### 根因
 
-原版 4.19 上游没有这些问题，以下均为 vendor 私改：
+Vendor 内核恢复了旧的 `pid_ns_prepare_proc` 机制：新 PID namespace 的第一个
+进程诞生时，`alloc_pid()` 会在 clone 发起者上下文中 `kern_mount()` 一个内部
+procfs。原子创建 user+PID namespace 时，内部 superblock 因而属于父进程的
+`init_user_ns`，子进程稍后请求 `sget_userns(新 userns)` 时返回 `-EBUSY`。
 
-### 改动① 复活了上古机制 `pid_ns_prepare_proc`
-
-`kernel/pid.c::alloc_pid()` 增加钩子——每个新 PID namespace 的第一个进程诞生时，
-内核自动 `kern_mount()` 一个**内部 procfs 实例**（上游多年前已删除该机制）。
-
-关键缺陷：这个内部挂载发生在 **clone 发起者（父进程）的上下文**里，
-其 superblock 属主 = 父进程当时的 userns。
-
-### 改动② `is_containerd()` cmdline 后门
-
-`fs/proc/root.c::proc_mount()` 嗅探 cmdline 是否以 `/system/bin/containerd`
-（HarmonyOS 微容器运行时）开头：
-
-- 命中 → superblock 以 **pidns 属主 userns** 创建
-- 未命中 → 普通 `sget()`，superblock 以 **挂载者当前 userns** 创建
-
-### EBUSY 因果链
-
-```text
-bwrap 父进程（init_user_ns）
-   │ clone(CLONE_NEWUSER|CLONE_NEWNS|CLONE_NEWPID)   ← 一次原子建仨
-   ▼
-copy_process()
-   ├── 建 U_new；P_new 属主 = U_new
-   ├── alloc_pid: 第一个进程诞生
-   │     └─ 🪝 pid_ns_prepare_proc(P_new)              ← 改动①
-   │          └─ kern_mount(proc)，此刻 current =【父进程】
-   │               is_containerd? cmdline="bwrap…" ≠ containerd
-   │               ⇒ 内部 proc sb【属主 = init_user_ns】 ⚠️
-   ▼
-bwrap 子进程（U_new ∩ P_new）
-   └─ mount -t proc
-        → sget_userns(请求者 = U_new)
-        → P_new 已有 sb 属主 init ≠ U_new
-        ⇒ -EBUSY 💥
-```
-
-分步式编排（先切 userns 再 fork 出 reaper）因 reaper 诞生时 current 已在新
-userns 而天然匹配，所以 `unshare(1)` 不受影响——这也是部分工具"时好时坏"
-错觉的来源。
-
-## 修复原理
-
-目标不变式：
-
-> **pidns P 的 procfs superblock，无论谁先挂载，属主一律 = P->user_ns。**
-
-`proc_mount` 中 `is_containerd` 判定尾部是一条条件跳转：
+`proc_mount` 中还有一条 HarmonyOS containerd cmdline 后门，会按
+`pidns->user_ns` 创建 superblock。KPM 将：
 
 ```asm
-bl   __pi_memcmp        ; cmdline == "/system/bin/containerd" ?
-cbz  w0, +0x74          ; 相等才走"按 pidns 属主建 sb"分支    ← 补丁点
-; ...不相等路径: 按【挂载者】userns 建 sb → 隐患源头
-+0x74:
-  sget_userns(ns->user_ns)   ; containerd 分支
+bl   __pi_memcmp
+cbz  w0, +0x74       ; 340003a0
 ```
 
-KPM 把 `cbz w0,+0x74`（`340003A0`）替换为无条件跳转 `b +0x74`（`1400001D`）。
-由于该指令**只在挂载者 userns ≠ pidns 属主时才会到达**，补丁后：
+改为无条件跳转：
 
-| 场景 | 补丁前 | 补丁后 |
-|---|---|---|
-| 原子 clone(USER\|PID) + 子进程挂 proc | EBUSY 💥 | sb 归属主 → 匹配 ✅ |
-| HarmonyOS 自家 containerd | 走属主分支 | 行为不变 ✅ |
-| 同 userns 挂载 | 等值快路径 | 不经过此指令，不变 ✅ |
-| 权限不足挂载（EPERM 类检查） | EPERM | 全部保留 ✅ |
+```asm
+b    +0x74           ; 1400001d
+```
+
+修复后的不变式是：pidns P 的 procfs superblock 一律属于 `P->user_ns`。
+
+## KernelPatch seccomp 兼容
+
+真机使用 KernelPatch `0.13.8 (d08)`。其 `commit_common_su()` 在切换 root
+凭据时只执行：
+
+```c
+thi->flags &= ~_TIF_SECCOMP;
+seccomp->mode = SECCOMP_MODE_DISABLED;
+// seccomp_filter_release(task);
+```
+
+这里没有释放或清空 `seccomp.filter`。只读诊断 KPM 在 APatch su 进程中读到：
+
+```text
+mode=0 filter=ffffffc395a68d40
+```
+
+因此从 `/proc/status` 看到的 `Seccomp: 0` 只表示 mode 被关闭，旧 Android
+seccomp 链仍保留。进程之后再安装 Codex 的过滤器时，内核会重新遍历这条旧链。
+
+在同一环境中，即使用一个最终动作仅为 `SECCOMP_RET_ALLOW` 的最小过滤器：
+
+- `#434` 正常执行
+- `#435`（clone3）、`#437`（openat2）、`#439`（faccessat2）返回
+  `SYS_SECCOMP` SIGSYS
+
+同一个 `kernel.patched` 在 QEMU 中不加载 APatch/KernelPatch 时，`#439` 正常
+返回 `ENOSYS`。因此问题来自 KernelPatch su 关闭 seccomp mode 时遗留的旧
+filter 链，不是基础内核镜像或 Codex 的 BPF 规则。
+
+NoHello `v1.8.3.7` 也曾 hook `__seccomp_filter`，会叠加这一故障；但移除
+NoHello 后，残留 filter 链仍会单独触发 SIGSYS。
+
+### 修复策略
+
+本模块只对 `0..434` 范围之外的 syscall、或 `sys_call_table` 中严格指向
+`sys_ni_syscall` / `__arm64_sys_ni_syscall` 的 syscall 生效：
+
+1. 校验 `el0_svc_common+0x70` 的 `cmp w20,#434` 指令；
+2. 在 `__secure_computing` 入口读取 `pt_regs->syscallno`；
+3. 命中未实现 syscall 时跳过 seccomp 计算；
+4. syscall 随后进入正常的 ni-syscall 路径并返回 `-ENOSYS`；
+5. musl 收到 `ENOSYS` 后回退到旧 syscall。
+
+已实现的系统调用不绕过。
+
+> **不要在线卸载 NoHello。** 它同时 hook `el0_svc_common`、
+> `__seccomp_filter`、`copy_process`、`exit_mmap`、`free_pgd_range` 和 mmap
+> 路径。实测 unload 时其他 CPU 仍从旧 trampoline 返回，出现非法 PC 的
+> `SP/PC alignment exception` 并 panic。应通过 APatch 配置停止加载并重启。
 
 ## 编译
 
-依赖交叉/本机 aarch64 gcc 或 clang，以及 [KernelPatch](https://github.com/bmax121/KernelPatch)
-的 KPM 头文件（以 git 子模块形式引用
-  [bmax121/KernelPatch](https://github.com/bmax121/KernelPatch)，clone 时加 `--recursive`
-  或 `git submodule update --init`）。
+依赖本机/交叉 aarch64 gcc 或 clang，以及 KernelPatch 子模块：
 
 ```sh
-make
+git submodule update --init
+make CC=aarch64-alpine-linux-musl-gcc
 ```
 
-> 注意必须带 `-fno-pic -fno-pie`：默认 PIE 会产生 KP 加载器不支持的
-> `R_AARCH64_ADR_GOT_PAGE / LD64_GOT_LO12_NC` 重定位，导致加载失败。
-> Makefile 已内置。
+Makefile 必须保留 `-fno-pic -fno-pie`，否则会产生 KP 加载器不支持的 GOT
+重定位。
 
 ## 使用
 
 通过 APatch/FolkPatch 的 KPM 加载通道载入。
 
-控制接口：
-
 | 操作 | 方式 |
 |---|---|
-| 状态查询 | CTL0 |
-| 应用 / 还原 | CTL1（参数非 0 = 应用，0 = 还原） |
-| 卸载并自动还原指令 | KPM unload |
+| 状态查询 | CTL0；返回 proc/seccomp 状态、跳过次数和错误码 |
+| 应用 / 还原 | CTL1；非 0 应用两者，0 还原两者 |
+| 卸载 | KPM unload；自动移除 hook 并恢复 proc_mount 原指令 |
 
-模块卸载或重启后补丁消失，可加入开机自启。
+| 加载参数 | 作用 |
+|---|---|
+| `no-proc` | 只启用 seccomp 兼容 |
+| `no-seccomp` | 只启用 procfs 修复 |
+| `off` | 只加载，不自动应用 |
 
 ## 安全设计
 
-- 运行时通过 kallsyms 解析 `proc_mount`，免疫 KASLR；
-- 打补丁前做三重指令上下文校验（前一条必须是 `bl memcmp`、跳转目标必须是
-  `mov x0,x23; bl kfree` 序列），任何不匹配直接拒绝加载，不会盲写内核；
-- 使用 KP 核心 `hotpatch()`（内部走内核原生 `aarch64_insn_patch_text()`，
-  stop_machine + icache 同步）；
-- 卸载无损还原原指令。
-
-## 验证矩阵（GOT-W29 实测）
-
-| 测试 | 结果 |
-|---|---|
-| `--unshare-user --unshare-pid`（原必死组合） | ✅ |
-| `--unshare-all` 全量隔离 | ✅ PID 1 reaper / PID 2 shell 结构正确 |
-| 各命名空间单独 unshare ×6 | ✅ |
-| 退出码穿透（中间进程转发） | ✅ exit 42 正确传递 |
+- `proc_mount` 通过 kallsyms 解析，并对周边指令做三重模式校验；
+- 使用 KernelPatch `hotpatch()`，由内核 stop_machine 和 icache 同步；
+- seccomp 兼容 hook 位于 `__secure_computing`，卸载时移除；
+- 只处理目标内核确实没有实现的 syscall；
+- 内核版本不是 4.19 时拒绝安装 seccomp 部分。
 
 ## 已知限制
 
-- 仅针对本逆向确认的 4.19 vendor 布局；其他内核版本靠运行时模式校验兜底，
-  不匹配则拒绝工作（安全失败）。
-- 同一 vendor 内核还存在 `unshare(CLONE_NEWNET)` 单独返回 ENOMEM 的独立问题
-  （clone 路径正常），本模块未涉及；受影响工具需避免在 unshare() 里携带
-  `CLONE_NEWNET`。
-
-## 附：Codex 沙箱 SIGSYS 备忘（4.19 vendor 内核 + Alpine/musl）
-
-> 2026-09 在同一台 GOT-W29 上的排查记录，供后续迁移/升级环境时参考。
-
-Codex CLI 0.154.0（aarch64-musl）在 `workspace-write` 沙箱内运行任何需要 PATH 查找的命令，
-都会报 `Bad system call` 并以 exit 159 结束（SIGSYS = 31）。
-
-**触发机制**：Codex 在“沙箱内禁用网络”时会额外安装一层 seccomp 过滤器，而该过滤器对本
-内核不支持的新系统调用使用 `SECCOMP_RET_TRAP`，而非返回 `ENOSYS` 让 libc 回退：
-
-- `faccessat2`（aarch64 #439，Linux 5.8+）：musl 的 `euidaccess` / `faccessat(AT_EACCESS)`
-  会优先调用它；bash 的 PATH 查找、`command -v`、`[[ -r/-w/-x ]]` 全部命中，进程在内核
-  有机会返回 ENOSYS 之前就被 SIGSYS 杀死。
-- `clone3`（aarch64 #435，Linux 5.3+）：musl 创建线程时会优先尝试，多线程程序同样被杀。
-
-**实测证据**：沙箱内静态探针捕获到 `si_code=1 (SYS_SECCOMP) syscall=439 arch=0xC00000B7
-(aarch64)`；同一调用在沙箱外返回 `ENOSYS`，musl 正常回退到老的 `faccessat`，因此问题不在
-内核，而在 seccomp 策略。
-
-**规避方式**：让沙箱的网络策略为 enabled，该 seccomp 过滤器就不会安装，bwrap 文件沙箱仍
-然生效：
-
-```toml
-sandbox_mode = "workspace-write"
-
-[sandbox_workspace_write]
-network_access = true
-```
-
-实测 `Seccomp: 0`，裸 `ls` / `command -v` / `[[ -r ]]` 恢复正常；`/etc`、`~/.codex` 仍为
-只读，工作区可写。注意 Android/HarmonyOS 的按 UID 网络策略会让 bwrap user namespace 内的
-`socket()` 返回 EPERM，所以沙箱内实际仍然没有外网。
-
-**建议上游修复**：对内核不支持的新 syscall 应返回 `ENOSYS`（`SECCOMP_RET_ERRNO`），而不是
-`SECCOMP_RET_TRAP`。
+- procfs 补丁依赖本逆向确认的 4.19 vendor 布局；不匹配时安全失败。
+- NoHello 的内部实现为 embedded pre-init，公开仓库版本与真机版本不一致；
+  KPM 对其运行时行为做兼容，不依赖其私有 ABI。
+- 同一 vendor 内核的 `unshare(CLONE_NEWNET)` ENOMEM 是独立问题，本模块未处理。

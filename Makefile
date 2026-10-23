@@ -18,11 +18,11 @@ INCLUDE_FLAGS := $(foreach dir,$(INCLUDE_DIRS),-I$(KP_DIR)/$(dir))
 # PIE 会产生 KP 加载器不支持的 GOT 重定位，必须关掉
 CFLAGS += -O2 -fno-stack-protector -fno-pic -fno-pie -fno-asynchronous-unwind-tables -fno-unwind-tables
 
-objs := hw_procfix.o
+objs := hw419_fixes.o
 
-all: hw_procfix.kpm
+all: hw419_fixes.kpm
 
-hw_procfix.kpm: ${objs}
+hw419_fixes.kpm: ${objs}
 	$(CC) -r -o $@ $^
 	objcopy -R .comment -R .eh_frame -R .rela.eh_frame $@ 2>/dev/null || true
 
