@@ -55,7 +55,7 @@
 KPM_NAME("hw419-fixes");
 KPM_VERSION("1.1.0");
 KPM_LICENSE("GPL v2");
-KPM_AUTHOR("ox-alpha");
+KPM_AUTHOR("ox-alpha and dsv4.1f");
 KPM_DESCRIPTION("Fix Huawei procfs ownership and 4.19 seccomp SIGSYS compatibility");
 
 #define TAG "[hw419-fixes] "
